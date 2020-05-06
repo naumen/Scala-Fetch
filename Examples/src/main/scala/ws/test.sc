@@ -1,0 +1,1 @@
+scala.util.Random.nextDouble
