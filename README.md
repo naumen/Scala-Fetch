@@ -403,3 +403,22 @@ println(Fetch.run(fetchSeq).unsafeRunSync)  // List(8, 8, 8, 8, 8)
 ```
 
 Этот запрос выполняется с ошибкой. Например, в ответе можно увидеть `List(4, 4, 4, 4, 4)`. Это связано с оптимизацией получения данных по одинаковому ID, которая в данном случае не нужна.
+
+## Обработка исключений
+
+В Fetch предоставлены: 
+
+- Общий трейт `FetchException`;
+- Специальное исключение `MissingIdentity` для несуществующих в источнике ID:
+- Общее исключение `UnhandledException` для любых остальных исключений.
+
+Мы уже запускали Fetch с результатом `Option`, но есть более безопасная альтернатива, возвращающая `Either`:
+
+```scala
+
+// val i: String = Fetch.run(Fetch(5, data.source)).unsafeRunSync // Exception in thread "main" fetch.package$MissingIdentity
+
+val i: Either[Throwable, String] = Fetch.run(Fetch(5, data.source)).attempt.unsafeRunSync // Left(fetch.package$MissingIdentity)
+
+```
+
