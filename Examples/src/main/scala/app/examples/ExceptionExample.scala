@@ -26,4 +26,8 @@ object ExceptionExample extends App with ContextEntities {
   //
   //    [Round 1] 🕛 0.00 seconds
   //      [Fetch one] From `My List of Data` with id 5 🕛 0.00 seconds
+
+  println(Fetch.run(Fetch(5, data.source)).attempt.unsafeRunSync.fold(describe, identity))
+  // Без runLog
+  // [ERROR] Identity with id `5` for data source `My List of Data` not found, fetch interrupted after 0 rounds
 }
