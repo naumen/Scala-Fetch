@@ -41,5 +41,20 @@ object CombineExample extends App with ContextEntities {
 
   println(Fetch.run(fetchTrv).unsafeRunSync)  // List(8, 8, 8, 8, 8)
 
+  println("Дедупликация:")
+
+  /** Дедупликация */
+  def fetchMultiD: Fetch[IO, (Int, String, Int, String)] =
+    for {
+      rnd1 <- Fetch(3, randomSource.source)  // Fetch[IO, Int]
+      char1 <- Fetch(rnd1, listSource.source)  // Fetch[IO, String]
+      rnd2 <- Fetch(3, randomSource.source)  // Fetch[IO, Int]
+      char2 <- Fetch(rnd2, listSource.source)  // Fetch[IO, String]
+    } yield (rnd1, char1, rnd2, char2)
+
+  println(Fetch.run(fetchMultiD).unsafeRunSync)
+  //18:43:11.875 [scala-execution-context-global-14] INFO app.sources.RandomSource - Getting next random by max 3
+  //18:43:11.876 [scala-execution-context-global-13] INFO app.sources.ListSource - Processing element from index 1
+  //(1,b,1,b)
 
 }
