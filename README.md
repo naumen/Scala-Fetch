@@ -11,14 +11,16 @@ https://www.47deg.com/blog/fetch-scala-library/
 
 Для этого в ней предоставляются средства, позволяющие писать чистый код без засорения конструкциями для кэширования/объединения запросов и т.п.
 
-## Структура источника
+В примерах используется последняя на момент написания **версия Fetch - 1.3.0**.
+
+## Источник данных в Fetch
 
 Для реализации доступа к какому-либо источнику через Fetch требуется реализовать для этого источника:
 
-- Описание источника (`Data[I, A]`);
-- Методы источника (`DataSource[F[_], I, A]`).
+- Описание источника данных (`Data[I, A]`);
+- Методы получения данных из источника (`DataSource[F[_], I, A]`).
 
-`DataSource[F[_], I, A]` (где **I** - тип идентификатора, по которому требуется что-то получить (например, путь к файлу), **A** - тип результата, а **F** - тип эффекта) содержит эффективные методы для доступа к источнику:
+`DataSource[F[_], I, A]` (где **I** - тип идентификатора, по которому требуется что-то получить (например, путь к файлу или ID в базе данных), **A** - тип результата, а **F** - тип эффекта) содержит эффективные методы для извлечения из него данных:
 
 ```scala
 /**
@@ -48,7 +50,7 @@ trait DataSource[F[_], I, A] {
 }
 ```
 
-`data: Data[I, A]` - содержит ссылку на экземпляр `Data[I,A]`, который является описанием источника.
+`data: Data[I, A]` - содержит ссылку на экземпляр `Data[I,A]`, который является описанием источника. `CF` - это "доказательство" того, что выбранная монада имеет инстанс `Concurrent`. Метод `fetch` - это метод получения из ID самих данных. `batch` - это тоже метод получения данных, но он предназначен для *одновременного* получения из источника нескольких ID. Изначально он описан в терминах `fetch` и не требует реализации (просто запускает всю пачку ID параллельно), но часто его бывает полезно переопределить - многие источники данных позволяют получить больше одного элемента за раз (например, реляционные базы данных).
 
 Простейший пример оборачивания листа в термины Fetch:
 
@@ -74,7 +76,7 @@ class ListDataSource(list: ListData)(implicit cs: ContextShift[IO])
 }
 ```
 
-Обычно DataSource вкладывают в Data для упрощения работы и сжатия кода:
+Обычно эти структуры совмещают - экземпляр DataSource вкладывают в класс-наследник Data. Это позволяет немного сжать код и хранить всё в одном месте:
 
 ```scala
 class ListSource(list: List[String])(implicit cf: ContextShift[IO]) extends Data[Int, String] with LazyLogging {
@@ -92,14 +94,26 @@ class ListSource(list: List[String])(implicit cf: ContextShift[IO]) extends Data
         list.lift(id)
       }
   }
-
-  def fetchElem(id: Int) = Fetch.optional(id, source)
 }
 ```
 
-К `fetchElem` вернемся позже.
+Внутрь метода `fetch` помещён логгер. В будущем он поможет отслеживать вызовы этой функции. В `Fetch` присутствуют свои инструменты для дебаггинга, но о них речь пойдёт в последней части статьи.
 
-Этими классами нельзя пользоваться напрямую (просто вызывать `fetch`). Их нужно оборачивать в специальные объекты `Fetch` и вызывать специальными методами:
+Сами по себе методы DataSource нельзя использовать напрямую. Нужно оборачивать их в специальные объекты `Fetch`. Эти объекты являются чем-то вроде "чертежей" для получения данных и содержат в себе идентификатор данных и источник. Затем их нужно передавать в методы объекта `Fetch` вроде `Fetch.run`. Эти объекты создают из источника и ID монаду с ответом. Эта манипуляция выглядит следующим образом:
+
+```scala
+val list                                = List("a", "b", "c")
+val data: ListSource                    = new ListSource(list)
+val source: DataSource[IO, Int, String] = data.source
+
+val fetchDataPlan: Fetch[IO, String] = Fetch(1, source)
+val fetchData: IO[String]            = Fetch.run(fetchDataPlan)
+val dataCalculated: String           = fetchData.unsafeRunSync // b
+```
+
+Оборачивание в специальный объект, хранящий ID и источник, позволяет выполнять библиотеке описанные выше оптимизации.
+
+Полный пример:
 
 ```scala
 object Example extends App {
@@ -127,8 +141,7 @@ object Example extends App {
 }
 ```
 
-
-Вызовы возвращают монады, которые указаны в типе `DataSource`. В целом это может быть любая монада `F`, для которой есть инстанс `Concurrent[F]`. `Concurrent` - это тайпкласс из Cats Effect. 
+Вызовы возвращают ответы, обёрнутые в монады. Их типы содержатся в параметрах `DataSource`. Например, `ListSource` будет возвращать `IO[String]`. В целом это может быть любая монада `F`, для которой есть инстанс `Concurrent[F]`.
 
 Последний вызов выбросил исключение, хотя `data.list.lift(id)` в методе `fetch` успешно защищает от несуществующих индексов. Исключение бросается в ситуациях, когда `fetch` возвращает `None`. Это связано с тем, что источник не может возвращать `Option` или содержать `Option` в качестве одного из типов: `DataSource[F[_], I, A]`. Но запросить `Option` можно явно, создав объект Fetch не через метод `apply`, а через `optional`:
 
@@ -136,11 +149,17 @@ object Example extends App {
 Fetch.run(Fetch.optional(3, source)).unsafeRunSync  // None
 ```
 
-Разница очевидна:
+Разницу можно понять просто взглянув на типы:
 
 ```scala
 val fApply: Fetch[IO, String]            = Fetch(3, source)
 val fOptional: Fetch[IO, Option[String]] = Fetch.optional(3, source)
+```
+
+Иногда внутрь классов-наследников `Data` помещают специальный метод, избавляющий от необходимости вручную составлять объект `Fetch`. Он может быть как обычным, так и `optional`:
+
+```scala
+def fetchElem(id: Int) = Fetch.optional(id, source)
 ```
 
 Теперь возможно переписать используемые методы на заранее подготовленный `fetchElem` в классе `ListSource`:
@@ -153,8 +172,6 @@ println(Fetch.run(data.fetchElem(2)).unsafeRunSync) // Some(c)
 println(Fetch.run(data.fetchElem(3)).unsafeRunSync) // None
 ```
 
-С такими методами нет необходимости хранить в классе SimpleExample переменную `val source = data.source`.
-
 ## Кэширование
 
 Fetch не кэширует результаты "из коробки":
@@ -165,22 +182,47 @@ def fetch(id: Int): Option[String] = {
   run.unsafeRunSync
 }
 
-fetch(1)
-fetch(1)
-fetch(1)
-
-// INFO app.ListDataSource - Processing element from index 1
-// INFO app.ListDataSource - Processing element from index 1
-// INFO app.ListDataSource - Processing element from index 1
+fetch(1)  // INFO app.ListDataSource - Processing element from index 1
+fetch(1)  // INFO app.ListDataSource - Processing element from index 1
+fetch(1)  // INFO app.ListDataSource - Processing element from index 1
 ```
 
-Для кэширования в Fetch существует специальный трейт `DataCache[F[_]]`. Сама библиотека предоставляет одну готовую имплементацию - иммутабельный кэш `InMemoryCache[F[_]: Monad](state: Map[(Data[Any, Any], DataSourceId), DataSourceResult])`. Им можно воспользоваться через методы его объекта-компаньона `from` и `empty`:
+Для кэширования в Fetch существует специальный трейт `DataCache[F[_]]`. Сама библиотека предоставляет одну готовую имплементацию - иммутабельный кэш `InMemoryCache[F[_]: Monad](state: Map[(Data[Any, Any], DataSourceId), DataSourceResult])`. Им можно воспользоваться через методы его объекта-компаньона `from` (создать кэш из готовой коллекции) и `empty` (создать пустой кэш):
+
+```scala
+def from[F[_]: Monad, I, A](results: ((Data[I, A], I), A)*): InMemoryCache[F] 
+def empty[F[_]: Monad]: InMemoryCache[F]
+```
+
+В обоих случаях в методах происходят преобразования, приводящие к тому, что кэш хранится в структуре данных типа `Map[(Data[Any, Any], DataSourceId), DataSourceResult]`. Дополнительные типы в этой карте:
+
+```scala
+final class DataSourceId(val id: Any)         extends AnyVal
+final class DataSourceResult(val result: Any) extends AnyVal
+```
+
+Получается, ключом этой карты является кортеж `(Data[Any, Any], DataSourceId)`. Он содежит источник данных (любого типа) и какой-то ID (любого типа). Значением карты является `DataSourceResult`, который содержит результат (тоже любого типа). Исходя из этого понятно, что в один кэш можно складывать результаты работы Fetch с самыми различными источниками данных. Ещё из этого следует, что конкретные типы при записи в кэш стираются - все данные имеют тип `Any` при хранении. Но они не остаются такими при извлечении. В случае с `InMemoryCache` извлечение из кэша происходит следующим образом:
+
+```scala
+def lookup[I, A](i: I, data: Data[I, A]): F[Option[A]] =
+  Applicative[F].pure(
+    state
+      .get((data.asInstanceOf[Data[Any, Any]], new DataSourceId(i)))
+      .map(_.result.asInstanceOf[A])
+  )
+```
+
+Тут важно, что `Data` является частью ключа. Именно из переданного экземпляра `Data` берётся тип `A`, к которому методом `asInstanceOf[A]` приводится хранимый в кэше тип `Any` при запросе. Вставка в этот кэш работает на основе обычного метода карт `updated`, который возвращает новую коллекцию при изменении.
+
+Наверное, никому особо не будет дела до кэша в коллекции, которая является обычной картой Scala - её можно и руками написать. Но используемые в ней приёмы пригодятся для подключения какой-нибудь специальной библиотеки для кэширования.
+
+Пример использования созданного кэша методом `from`:
 
 ```scala
 val cacheF: DataCache[IO] = InMemoryCache.from((data, 1) -> "b", (data, 2) -> "c")
 
-Fetch.run(data.fetchElem(1), cacheF).unsafeRunSync
-Fetch.run(data.fetchElem(1), cacheF).unsafeRunSync
+Fetch.run(data.fetchElem(1), cacheF).unsafeRunSync  // взялось из кэша
+Fetch.run(data.fetchElem(1), cacheF).unsafeRunSync  // прочитано из кэша
 Fetch.run(data.fetchElem(1), cacheF).unsafeRunSync
 Fetch.run(data.fetchElem(1), cacheF).unsafeRunSync
 Fetch.run(data.fetchElem(0), cacheF).unsafeRunSync
@@ -190,7 +232,7 @@ Fetch.run(data.fetchElem(0), cacheF).unsafeRunSync
 // INFO app.ListDataSource - Processing element from index 0
 ```
 
-Видно, что кэширование работает, хотя сам по себе кэш не пополняется. Кэш иммутабелен - сама по себе вставка в InMemoryCache возвращает копию кэша с новым значением, а не изменяет существующий. Это означает, что кэшем нужно *управлять вручную*. Для работы с этим поведением существует метод `Fetch.runCache`, который возвращает кортеж типа `(обновленный кэш, результат)`:
+Видно, что кэширование работает, хотя кэш и не пополняется новыми элементами. Уже ясно, что это происходит из-за устройства кэша - иммутабельная карта возвращает новую коллекцию при любом изменении. Это означает, что кэшем нужно *управлять вручную*. Для работы с этим поведением существует метод `Fetch.runCache`, который возвращает кортеж типа `(обновленный кэш, результат)`:
 
 ```scala
 var cache: DataCache[IO] = InMemoryCache.empty
@@ -216,13 +258,72 @@ cachedRun(4)
 
 Видно, что неудачные результаты не кэшируются. При этом сам кэш не имеет явного типа - один кэш можно использовать для многих источников. 
 
-Опять же, специальный метод позволит 
+### Пример: использование Caffeine для кэширования
+
+Для подключения собственной библиотеки кэширования нужно лишь имплементировать трейт `DataCache`. Полученный класс позволит использовать библиотеку в любых вызовах Fetch. Следующим образом можно реалиховать `DataCache` для известной Java-библиотеки **Caffeine** (а точнее - для её обёртки на Scala **Scaffeine**):
+
+```scala
+class ScaffeineCache extends DataCache[IO] with LazyLogging {
+
+  private val cache =
+    Scaffeine()
+      .recordStats()
+      .expireAfterWrite(1.hour)
+      .maximumSize(500)
+      .build[(Data[Any, Any], Any), Any]()
+
+  override def lookup[I, A](i: I, data: Data[I, A]): IO[Option[A]] = IO {
+    cache
+      .getIfPresent(data.asInstanceOf[Data[Any, Any]] -> i)
+      .map { any =>
+        val correct = any.asInstanceOf[A]
+        logger.info(s"From cache: $i")
+        correct
+      }
+  }
+
+  override def insert[I, A](i: I, v: A, data: Data[I, A]): IO[DataCache[IO]] = {
+    cache.put(data.asInstanceOf[Data[Any, Any]] -> i, v) // Unit
+    IO(this)
+  }
+
+}
+```
+
+Здесь используются все те же приёмы, что и в `InMemoryCache`. Так как `Scaffeine` работает с типизированными кэшами - кэш создаётся с типами `Any`: `build[(Data[Any, Any], Any), Any]()`. Затем запись и получение данных из него производится с использованием `asInstanceOff`:
+
+```scala
+val list  = List("a", "b", "c")
+val listSource  = new ListSource(list)
+val source = listSource.source
+val randomSource = new RandomSource()
+val cache = new ScaffeineCache()
+
+/** Без кэширования */
+Fetch.run(Fetch(1, source)).unsafeRunSync // Processing element from index 1
+Fetch.run(Fetch(1, source)).unsafeRunSync // Processing element from index 1
+
+println()
+
+/** С кэшированием */
+Fetch.run(Fetch(1, source), cache).unsafeRunSync // Processing element from index 1
+Fetch.run(Fetch(1, source), cache).unsafeRunSync // From cache: 1
+Fetch.run(Fetch("a", source), cache).unsafeRunSync // type mismatch
+
+/** Один кэш подходит разным источникам */
+Fetch.run(randomSource.fetchInt(2), cache).unsafeRunSync  // Getting next random by max 2
+Fetch.run(randomSource.fetchInt(2), cache).unsafeRunSync  // From cache: 2
+```
+
+Можно заметить несколько вещей. 
+Во-первых, при попытке использовать кэш с неправильным типом ID (чтобы попытаться нарушить работу `asInstanceOf`) произойдёт `type mismatch` по причине создания объекта `Fetch` с ID и Source, не подходящими друг другу по типам. 
+Во-вторых, один и тот же кэш действительно можно использовать для разных источников.
+Наконец, благодаря внутреннему устройству Caffeine, нам не нужно вручную управлять изменениями кэша - мы просто передаём одну и ту же ссылку в каждый вызов. Несмотря на это, трейт `DataCache` всё равно требует возвращать ссылку на кэш в методе `insert`.
 
 
+### Пример: использование Caffeine с Akka Play для кэширования
 
-### Пример: обертка для кэша Akka Play
-
-Для организации собственного кэша нужно имплементировать тип `DataCache`. Например, вот так выглядит обертка для модуля кэширования Akka Play `AsyncCacheApi` для библиотеки Caffeine (полный пример: https://github.com/DenisNovac/akka-play-integrations/tree/master/play-fetch-cache):
+Фреймворк **Akka Play** предоставляет специальное API для работы с кэшами. Он может работать и с Caffeine тоже. И его API напрямую можно использовать в Fetch при необходимости. Это выглядит следующим образом (полный пример: https://github.com/DenisNovac/akka-play-integrations/tree/master/play-fetch-cache):
 
 ```scala
 case class CaffeineAkkaCache(asyncAkkaCache: AsyncCacheApi, expiration: FiniteDuration)(
@@ -244,11 +345,15 @@ case class CaffeineAkkaCache(asyncAkkaCache: AsyncCacheApi, expiration: FiniteDu
 }
 ```
 
-Преимущество этого кэша в том, что им не нужно управлять вручную. Хотя он и возвращает ссылку на себя, результаты в нем сохраняются через API Akka, управлять самой ссылкой нет необходимости - достаточно просто передавать его в метод `Fetch.run`. 
+Akka Play использует немного другой подход к хранению данных в кэше. По большому счёту, за нас сделана половина работы - значения в кэшах Akka Play могут быть любых типов из коробки:
 
-В `insert` можно заложить и собственные механизмы изменения кэша изнутри чтобы избавиться от вызовов `runCache` (например, хранить кэш в монаде `Ref`). 
+```scala
+def set(key: String, value: Any, expiration: Duration = Duration.Inf): Future[Done]
+```
 
-Сам кэш можно завернуть в модуль Play и таким образом использовать во всей программе:
+А вот ключи могут быть только строковыми, поэтому в примерах используется `toString`. В серьёзных приложениях стоит задуматься о передаче более уникального идентификатора - например, хэша. 
+
+Сам кэш можно завернуть в модуль Play и таким образом инжектировать в любой модуль программы:
 
 ```scala
 class CaffeineFetchBinder extends Module {

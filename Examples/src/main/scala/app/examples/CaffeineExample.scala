@@ -12,7 +12,7 @@ import fetch.{Data, DataCache, Fetch}
 
 import scala.util.Try
 
-case class ScaffeineCache() extends DataCache[IO] with LazyLogging {
+class ScaffeineCache extends DataCache[IO] with LazyLogging {
 
   private val cache =
     Scaffeine()
@@ -41,18 +41,20 @@ case class ScaffeineCache() extends DataCache[IO] with LazyLogging {
 object CaffeineExample extends App with ContextEntities {
   val list  = List("a", "b", "c")
   val listSource  = new ListSource(list)
+  val source = listSource.source
   val randomSource = new RandomSource()
-  val cache = ScaffeineCache()
+  val cache = new ScaffeineCache()
 
   /** Без кэширования */
-  Fetch.run(listSource.fetchElem(1)).unsafeRunSync // Processing element from index 1
-  Fetch.run(listSource.fetchElem(1)).unsafeRunSync // Processing element from index 1
+  Fetch.run(Fetch(1, source)).unsafeRunSync // Processing element from index 1
+  Fetch.run(Fetch(1, source)).unsafeRunSync // Processing element from index 1
 
   println()
 
   /** С кэшированием */
-  Fetch.run(listSource.fetchElem(1), cache).unsafeRunSync // Processing element from index 1
-  Fetch.run(listSource.fetchElem(1), cache).unsafeRunSync // From cache: 1
+  Fetch.run(Fetch(1, source), cache).unsafeRunSync // Processing element from index 1
+  Fetch.run(Fetch(1, source), cache).unsafeRunSync // From cache: 1
+  //Fetch.run(Fetch("a", source), cache).unsafeRunSync // type mismatch
 
   /** Один кэш подходит разным источникам */
   Fetch.run(randomSource.fetchInt(2), cache).unsafeRunSync  // Getting next random by max 2
