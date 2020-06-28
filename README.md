@@ -319,62 +319,6 @@ Fetch.run(randomSource.fetchInt(2), cache).unsafeRunSync  // From cache: 2
 Во-вторых, один и тот же кэш действительно можно использовать для разных источников.
 Наконец, благодаря внутреннему устройству Caffeine, нам не нужно вручную управлять изменениями кэша - мы просто передаём одну и ту же ссылку в каждый вызов. Несмотря на это, трейт `DataCache` всё равно требует возвращать ссылку на кэш в методе `insert`.
 
-
-### Пример: использование Caffeine с Akka Play для кэширования
-
-Фреймворк **Akka Play** предоставляет специальное API для работы с кэшами. Он может работать и с Caffeine тоже. И его API напрямую можно использовать в Fetch при необходимости. Это выглядит следующим образом (полный пример: https://github.com/DenisNovac/akka-play-integrations/tree/master/play-fetch-cache):
-
-```scala
-case class CaffeineAkkaCache(asyncAkkaCache: AsyncCacheApi, expiration: FiniteDuration)(
-    implicit val ec: ExecutionContext,
-    implicit val cs: ContextShift[IO]
-) extends DataCache[IO] with LazyLogging {
-
-  override def lookup[I, A](i: I, data: Data[I, A]): IO[Option[A]] = {
-    logger.debug(s"Searching in cache $i")
-    val l: Future[Option[A]] = asyncAkkaCache.get(i.toString)
-    IO.fromFuture(IO(l))
-  }
-
-  override def insert[I, A](i: I, v: A, data: Data[I, A]): IO[DataCache[IO]] = {
-    logger.debug(s"Inserting to cache $i")
-    val f: Future[Done] = asyncAkkaCache.set(i.toString, v, expiration) // Результат от апи Play вернуть не получится
-    this.pure[IO]
-  }
-}
-```
-
-Akka Play использует немного другой подход к хранению данных в кэше. По большому счёту, за нас сделана половина работы - значения в кэшах Akka Play могут быть любых типов из коробки:
-
-```scala
-def set(key: String, value: Any, expiration: Duration = Duration.Inf): Future[Done]
-```
-
-А вот ключи могут быть только строковыми, поэтому в примерах используется `toString`. В серьёзных приложениях стоит задуматься о передаче более уникального идентификатора - например, хэша. 
-
-Сам кэш можно завернуть в модуль Play и таким образом инжектировать в любой модуль программы:
-
-```scala
-class CaffeineFetchBinder extends Module {
-
-  override def bindings(environment: Environment, configuration: Configuration): collection.Seq[Binding[_]] =
-    Seq(bind[CacheModule].to[CaffeineFetchModule].eagerly())
-}
-
-trait CacheModule {}
-
-@Singleton
-class CaffeineFetchModule @Inject() (
-    @NamedCache("fetch-cache") fetchCache: AsyncCacheApi
-)(implicit val ec: ExecutionContext)
-    extends CacheModule
-    with LazyLogging {
-
-  implicit val cs: ContextShift[IO] = IO.contextShift(ec)
-  val cache: DataCache[IO] = CaffeineAkkaCache(fetchCache, 1.hour)
-}
-```
-
 ## Комбинаторы
 
 В Fetch возможно использовать различные комбинаторы из Scala и Cats. Смысл этих комбинаторов - преобразовать тип `List[Fetch[_,_]]` в `Fetch[_, List[_]]`, который затем передаётся в `Fetch.run`. Это необходимо для осуществления всех видов оптимизаций Fetch - объединения запросов, комбинирования, дедупликации, запусках в параллели. Оптимизации Fetch распространяются только на то, что передано внутри объекта `Fetch` в текущем `Fetch.run` (единственное исключение - кэширование, которое работает между запросами).
@@ -680,6 +624,72 @@ object DebugExample extends App with ContextEntities {
 - Комбинированный запрос к нескольким источникам выглядит в логах как один раунд с несколькими запросами.
 
 Действия в пределах одного раунда происходят параллельно. Сами по себе раунды разделены методом `>>`, который предполагает только последовательный запуск. А вот в раундах 3 и 4 использован метод `tupled`, который и позволяет запускать запросы параллельно. В первом случае это запрос к одному источнику, который был объединён. Во втором случае этот запрос был к разным источникам, поэтому он был запущен параллельно.
+
+## Пример: запрос данных из реальных источников
+
+Часто бывают ситуации, когда нужно предоставить пользователю выдачу на основании нескольких источников, данные из которых должны быть скомбинированы. Например, поисковая выдача по документам может для одного запроса обратиться к нескольким сервисам:
+
+- Elasticsearch для получения ID документов, содержащих нужные данные;
+- Сервис документов для получения ссылок на все документы по ID;
+- Сервис авторов для получения списка авторов этих документов;
+- Сервис аннотаций для получения краткого описания этих документов.
+
+Заметно, что последние три запроса можно выполнять параллельно и затем сгруппировать результаты по ID. Но все три зависят от первого запроса, который и возвращает список ID. 
+
+Сервис может выглядеть примерно так:
+
+```scala
+object Runner extends App with ContextEntities {
+
+  // Псевдо-сервисы
+  val elasticsearchSource = new ElasticsearchSource().source
+  val documentsSource     = new GenericSource("Document URL").source
+  val authorsSource       = new GenericSource("Author").source
+  val annotationsSource   = new GenericSource("Annotation").source
+
+  val fetch: Fetch[IO, (List[Answer], List[Answer], List[Answer])] = for {
+
+    searchResults <- Fetch("to be or not to be", elasticsearchSource)
+
+    documents: Fetch[IO, List[Answer]]   = searchResults.traverse(r => Fetch(r, documentsSource))
+    authors: Fetch[IO, List[Answer]]     = searchResults.traverse(r => Fetch(r, authorsSource))
+    annotations: Fetch[IO, List[Answer]] = searchResults.traverse(r => Fetch(r, annotationsSource))
+
+    inParallel <- (documents, authors, annotations).tupled
+
+  } yield inParallel
+
+  val result: (List[Answer], List[Answer], List[Answer]) = Fetch.run(fetch).unsafeRunSync
+
+  val comb: MapView[Int, String] =
+    result.productIterator
+      .asInstanceOf[Iterator[List[Answer]]]
+      .toList
+      .map(_.distinct)
+      .foldRight(List.empty[Answer])((e, a) => e ++ a)
+      .groupBy(_.id)
+      .view.mapValues(_.map(_.content).mkString(", "))
+
+  println(comb.mkString("\n"))
+
+}
+```
+
+Мы используем `tupled` для получения объекта Fetch `inParallel`, запуск которого будет осуществлён в параллели. Затем мы группируем полученные результаты и получаем что-то подобное:
+
+```
+INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Document URL: NonEmptyList(5, 10, 14, 1, 6)
+INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Author: NonEmptyList(5, 10, 14, 1, 6)
+INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Annotation: NonEmptyList(5, 10, 14, 1, 6)
+
+5 -> Document URL: https://en.wikipedia.org/wiki/Hamlet, Author: William Shakespeare, Annotation: The play depicts Prince Hamlet and his revenge against his uncle, Claudius, who has murdered Hamlet's father in order to seize his throne and marry Hamlet's mother
+
+...
+
+``` 
+
+Метод `distinct` здесь можно использовать на промежуточном результате - прямо в `searchResults`. В любом случае, при запросе в сервисы происходит дедупликация, поэтому повторяющиеся ID не запрашиваются (но возвращаются). Их всё же следует отбросить позже - во время преобразований в `comb`. 
+
 
 ## Выводы
 
