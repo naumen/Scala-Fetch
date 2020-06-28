@@ -10,6 +10,7 @@ import cats.syntax.functor._
 import cats.instances.list._
 import cats.syntax.traverse._
 import cats.syntax.apply._
+import fs2.{Chunk, Stream}
 
 import scala.collection.MapView // for tupled
 
@@ -42,8 +43,42 @@ object Runner extends App with ContextEntities {
       .map(_.distinct)
       .foldRight(List.empty[Answer])((e, a) => e ++ a)
       .groupBy(_.id)
-      .view.mapValues(_.map(_.content).mkString(", "))
+      .view
+      .mapValues(_.map(_.content).mkString(", "))
 
   println(comb.mkString("\n"))
 
+  println("Streaming example: ")
+
+  def streamResults(ids: List[Int]): IO[Vector[(Chunk[Answer], Chunk[Answer], Chunk[Answer])]] =
+    Stream
+      .emits[IO, Int](ids)
+      .chunkLimit(3)
+      .evalMap { groupByThree =>
+        val documents   = groupByThree.traverse(Fetch(_, documentsSource))
+        val authors     = groupByThree.traverse(Fetch(_, authorsSource))
+        val annotations = groupByThree.traverse(Fetch(_, annotationsSource))
+        println()
+        Fetch.run((documents, authors, annotations).tupled)
+      }
+      .compile
+      .toVector
+
+  val fetchStream: IO[Vector[(Chunk[Answer], Chunk[Answer], Chunk[Answer])]] = for {
+    searchResults <- Fetch.run(Fetch("to be or not to be", elasticsearchSource))
+    result        <- streamResults(searchResults)
+  } yield result
+
+  val streamResult = fetchStream.unsafeRunSync
+
+  val combStream =
+    streamResult
+      .map(t => t._1.toList ++ t._2.toList ++ t._3.toList)
+      .toList
+      .flatten
+      .groupBy(_.id)
+      .view
+      .mapValues(_.map(_.content).mkString(", "))
+
+  println(combStream.mkString("\n"))
 }

@@ -629,8 +629,8 @@ object DebugExample extends App with ContextEntities {
 
 Часто бывают ситуации, когда нужно предоставить пользователю выдачу на основании нескольких источников, данные из которых должны быть скомбинированы. Например, поисковая выдача по документам может для одного запроса обратиться к нескольким сервисам:
 
-- Elasticsearch для получения ID документов, содержащих нужные данные;
-- Сервис документов для получения ссылок на все документы по ID;
+- Elasticsearch для получения ID документов по какому-то поисковому запросу;
+- Сервис документов для получения ссылок на все подходящие документы по ID;
 - Сервис авторов для получения списка авторов этих документов;
 - Сервис аннотаций для получения краткого описания этих документов.
 
@@ -688,7 +688,57 @@ INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Annotation: 
 
 ``` 
 
-Метод `distinct` здесь можно использовать на промежуточном результате - прямо в `searchResults`. В любом случае, при запросе в сервисы происходит дедупликация, поэтому повторяющиеся ID не запрашиваются (но возвращаются). Их всё же следует отбросить позже - во время преобразований в `comb`. 
+Метод `distinct` здесь можно использовать на промежуточном результате - прямо в `searchResults`. В любом случае, при запросе в сервисы происходит дедупликация, поэтому повторяющиеся ID не запрашиваются (но возвращаются как если бы были запрошены). Их всё же следует отбросить позже - во время преобразований в `comb`. 
+
+Наконец, обычно сервисы не принимают бесконечное количество ID в запросе. В таких случаях пакетные запросы могут быть разделены через указание `maxBatchSize` как было описано выше. Кроме того, держать в памяти огромное количество полученных объектов (по три на каждый ID) может быть затратно. В таком случае очень удобно делать запросы в потоке. Предположим, что наше API принимает только 3 ID за раз. Тогда напишем функцию для считывания документов в потоке через библиотеку fs2. При этом имеет смысл разбить поток по 3 ID, всё равно это размер одного пакета API:
+
+```scala
+def streamResults(ids: List[Int]): IO[Vector[(Chunk[Answer], Chunk[Answer], Chunk[Answer])]] =
+  Stream
+    .emits[IO, Int](ids)
+    .chunkLimit(3)
+    .evalMap { groupByThree =>
+      val documents   = groupByThree.traverse(Fetch(_, documentsSource))
+      val authors     = groupByThree.traverse(Fetch(_, authorsSource))
+      val annotations = groupByThree.traverse(Fetch(_, annotationsSource))
+      println()
+      Fetch.run((documents, authors, annotations).tupled)
+    }
+    .compile
+    .toVector
+
+val fetchStream: IO[Vector[(Chunk[Answer], Chunk[Answer], Chunk[Answer])]] = for {
+  searchResults <- Fetch.run(Fetch("to be or not to be", elasticsearchSource))
+  result        <- streamResults(searchResults)
+} yield result
+
+val streamResult = fetchStream.unsafeRunSync
+
+val combStream =
+  streamResult
+    .map(t => t._1.toList ++ t._2.toList ++ t._3.toList)
+    .toList
+    .flatten
+    .groupBy(_.id)
+    .view
+    .mapValues(_.map(_.content).mkString(", "))
+
+println(combStream.mkString("\n"))
+```
+
+Опять же, запросы к сервисам будут происходить параллельно, это видно по их случайному порядку в логах:
+
+```scala
+INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Author: NonEmptyList(1, 2, 3)
+INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Document URL: NonEmptyList(1, 2, 3)
+INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Annotation: NonEmptyList(1, 2, 3)
+
+INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Annotation: NonEmptyList(4, 5, 6)
+INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Author: NonEmptyList(4, 5, 6)
+INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Document URL: NonEmptyList(4, 5, 6)
+```
+
+Так как и Fetch, и Stream в данном случае используют тип `IO` - удобно использовать `evalMap`. Внутренний тип `IO` от `Fetch.run` и внешний от `compile` автоматически будут совмещены и получится удобный для работы тип `IO[Vector[...]]` без внутренних `IO`.
 
 
 ## Выводы

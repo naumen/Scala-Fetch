@@ -11,3 +11,4 @@ libraryDependencies += "ch.qos.logback"             % "logback-classic" % "1.2.3
 libraryDependencies += "com.typesafe.scala-logging" %% "scala-logging"  % "3.9.2"
 
 libraryDependencies += "com.github.blemale" %% "scaffeine" % "4.0.1"
+libraryDependencies += "co.fs2"             %% "fs2-core"  % "2.4.2"

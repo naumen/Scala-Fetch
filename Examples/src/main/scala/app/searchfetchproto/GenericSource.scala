@@ -23,6 +23,8 @@ class GenericSource(override val name: String)(implicit cf: ContextShift[IO])
 
     override def CF: Concurrent[IO] = Concurrent[IO]
 
+    override def maxBatchSize: Option[Int] = 3.some
+
     override def batch(ids: NonEmptyList[Int]): IO[Map[Int, Answer]] = {
       logger.info(s"IDs fetching in batch for $name: $ids")
       super.batch(ids)
