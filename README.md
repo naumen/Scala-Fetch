@@ -779,7 +779,7 @@ INFO app.searchfetchproto.source.DocumentInfoSource - Document IDs fetching in b
 INFO app.searchfetchproto.source.PersonSource - Person IDs fetching in batch: NonEmptyList(1, 2, 3)
 ```
 
-На самом деле, поиск похожих документов тоже параллельно, ведь для него не описано отдельного метода batch:
+На самом деле, поиск похожих документов тоже осуществляется параллельно, ведь для него не описано отдельного метода batch:
 
 ```scala
 [Round 1]  0.12 seconds
@@ -788,6 +788,41 @@ INFO app.searchfetchproto.source.PersonSource - Person IDs fetching in batch: No
   [Round 2]  0.00 seconds
     [Batch] From `Persons source` with ids List(1, 2, 3)  0.00 seconds
 ```
+
+В коде метода `searchDocumentFetch` есть момент:
+
+```scala
+(documentItemFetch(id), fetchSimilarItems(id)).tupled
+```
+
+Эти запросы должны выполняться параллельно благодаря `tupled`. И, хотя `fetchSimilarItems` запускает свой собственный `documentItemFetch`, из логов видно, что обращение в сервис информации о документах происходит единожды и всегда после обращения в сервис похожих:
+
+```
+[Batch] From `Similar Document Source` with ids List(4, 5, 2, 3, 6, 1) 0.06 seconds
+[Batch] From `Document Info Source` with ids List(4, 5, 2, 3, 6, 1) 0.12 seconds
+```
+
+Это происходит при незначительной задержке сервиса похожих документов, когда результат первого запроса приходит быстрее, чем начинается следующий запрос. Такой результат используется в следующем запросе и позволяет ещё больше оптимизировать запросы. Если же искуственно повысить время выполнения (например, добавив `Thread.sleep(100)` в сервис), то можно наблюдать такую картину:
+
+```
+INFO app.searchfetchproto.source.DocumentInfoSource - Document IDs fetching in batch: NonEmptyList(4, 5, 2, 3, 6, 1)
+INFO app.searchfetchproto.source.SimilarDocumentSource - Fetching similar documents for ID: 4. It is: None
+INFO app.searchfetchproto.source.SimilarDocumentSource - Fetching similar documents for ID: 5. It is: Some(List(6))
+INFO app.searchfetchproto.source.SimilarDocumentSource - Fetching similar documents for ID: 3. It is: Some(List(1))
+INFO app.searchfetchproto.source.SimilarDocumentSource - Fetching similar documents for ID: 2. It is: Some(List(1))
+INFO app.searchfetchproto.source.SimilarDocumentSource - Fetching similar documents for ID: 6. It is: Some(List(5))
+INFO app.searchfetchproto.source.SimilarDocumentSource - Fetching similar documents for ID: 1. It is: Some(List(2, 3))
+INFO app.searchfetchproto.source.DocumentInfoSource - Document IDs fetching in batch: NonEmptyList(5, 2, 3, 6, 1)
+
+  [Round 1]  0.13 seconds
+    [Batch] From `Similar Document Source` with ids List(4, 5, 2, 3, 6, 1)  0.13 seconds
+    [Batch] From `Document Info Source` with ids List(4, 5, 2, 3, 6, 1)  0.08 seconds
+  [Round 2]  0.00 seconds
+    [Batch] From `Document Info Source` with ids List(5, 2, 3, 6, 1)  0.00 seconds
+    [Batch] From `Persons source` with ids List(1, 2, 3)  0.00 seconds
+```
+
+Четвёртый документ не является похожим ни для каких документов, поэтому не запрашивается во время выполнения `fetchSimilarItems`. Поэтому явно видно, что второй запрос относится к методу поиска похожих.
 
 
 ## Выводы
