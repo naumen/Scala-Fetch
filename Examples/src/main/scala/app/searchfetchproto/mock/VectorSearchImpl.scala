@@ -15,5 +15,7 @@ class VectorSearchImpl extends VectorSearch[IO] {
     "6" -> List(SimilarityItem("5", 0.5))
   )
 
-  override def similar(id: DocumentId): IO[List[SimilarityItem]] = IO(similars(id))
+  override def similar(id: DocumentId): IO[List[SimilarityItem]] = IO {
+    similars(id)
+  }
 }

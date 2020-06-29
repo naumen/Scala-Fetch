@@ -3,7 +3,8 @@ package app.searchfetchproto.mock
 import app.ContextEntities
 import app.searchfetchproto.{DocumentSearchExample, DocumentSearchResponse}
 import cats.effect.IO
-import fetch.Fetch
+import fetch.{Fetch, Log}
+import fetch.debug.describe
 
 object FetchRunner extends App with ContextEntities {
 
@@ -17,10 +18,10 @@ object FetchRunner extends App with ContextEntities {
 
   val fetch: Fetch[IO, DocumentSearchResponse] = searchExample.searchDocumentFetch("To be or not to be")
 
-  val r: DocumentSearchResponse = Fetch.run(fetch).unsafeRunSync
+  val r: (Log, DocumentSearchResponse) = Fetch.runLog(fetch).unsafeRunSync
 
-  println()
-  println(r.items.mkString(";\n"))
+  println(r._2.items.mkString(";\n"))
+  println(describe(r._1))
 
 }
 

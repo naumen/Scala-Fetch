@@ -12,7 +12,7 @@ class PersonSource(personRepo: PersonRepo[IO], maxBatch: Option[Int] = None)(
 ) extends Data[PersonId, Person]
     with LazyLogging {
 
-  override def name: String          = "Document Info Source"
+  override def name: String          = "Persons source"
   private def instance: PersonSource = this
 
   def source: DataSource[IO, PersonId, Person] = new DataSource[IO, PersonId, Person] {
