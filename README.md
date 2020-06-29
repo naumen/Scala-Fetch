@@ -634,7 +634,7 @@ object DebugExample extends App with ContextEntities {
 - Сервис получения имени автора документа из его ID;
 - Сервис похожих документов.
 
-Тогда сервис поиска документов может быть построен следующим образом (полный пример):
+Тогда сервис поиска документов может быть построен следующим образом ([полный пример](Examples/src/app/searchfetchproto/DocumentSearchExample.sc)):
 
 ```scala
 /*Model*/
