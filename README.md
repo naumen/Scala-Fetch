@@ -634,7 +634,7 @@ object DebugExample extends App with ContextEntities {
 - Сервис получения имени автора документа из его ID;
 - Сервис похожих документов.
 
-Тогда сервис поиска документов может быть построен следующим образом ([полный пример](./Examples/src/main/scala/app/searchfetchproto/DocumentSearchExample.sc)):
+Тогда сервис поиска документов может быть построен следующим образом ([полный пример](./Examples/src/main/scala/app/searchfetchproto/)):
 
 ```scala
 /*Model*/
@@ -736,6 +736,47 @@ similarSource
       }
     }
   }
+```
+
+Для примера реализуем все репозитории на простых коллекциях:
+
+```scala
+private val docInfo = Map(
+  "1" -> DocumentInfo("1", "Document 1", List(1)),
+  "2" -> DocumentInfo("2", "Document 2", List(1,2)),
+  "3" -> DocumentInfo("3", "Document 3", List(3,1)),
+  "4" -> DocumentInfo("4", "Document 4", List(2,1)),
+  "5" -> DocumentInfo("5", "Document 5", List(2)),
+  "6" -> DocumentInfo("6", "Document 6", List(1,3))
+)
+
+private val similars = Map(
+  "1" -> List(SimilarityItem("2", 0.7), SimilarityItem("3", 0.6)),
+  "2" -> List(SimilarityItem("1", 0.7)),
+  "3" -> List(SimilarityItem("1", 0.6)),
+  "4" -> List(),
+  "5" -> List(SimilarityItem("6", 0.5)),
+  "6" -> List(SimilarityItem("5", 0.5))
+)
+
+private val persons = Map(
+  1 -> Person(1, "Rick Deckard"),
+  2 -> Person(2, "Roy Batty"),
+  3 -> Person(3, "Joe")
+)
+```
+
+Заметно, что все документы в качестве похожих имеют ссылки друг на друга и пересекающихся авторов. Однако, при запуске видно, что каждый документ и автор были запрошены лишь раз:
+
+```
+INFO app.searchfetchproto.source.SimilarDocumentSource - Fetching similar documents for ID: 2. It is: Some(List(1))
+INFO app.searchfetchproto.source.SimilarDocumentSource - Fetching similar documents for ID: 4. It is: None
+INFO app.searchfetchproto.source.SimilarDocumentSource - Fetching similar documents for ID: 3. It is: Some(List(1))
+INFO app.searchfetchproto.source.SimilarDocumentSource - Fetching similar documents for ID: 1. It is: Some(List(2, 3))
+INFO app.searchfetchproto.source.SimilarDocumentSource - Fetching similar documents for ID: 6. It is: Some(List(5))
+INFO app.searchfetchproto.source.SimilarDocumentSource - Fetching similar documents for ID: 5. It is: Some(List(6))
+INFO app.searchfetchproto.source.DocumentInfoSource - Document IDs fetching in batch: NonEmptyList(4, 5, 2, 3, 6, 1)
+INFO app.searchfetchproto.source.PersonSource - Person IDs fetching in batch: NonEmptyList(1, 2, 3)
 ```
 
 
