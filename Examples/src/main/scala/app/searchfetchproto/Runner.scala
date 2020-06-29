@@ -48,7 +48,7 @@ object Runner extends App with ContextEntities {
 
   println(comb.mkString("\n"))
 
-  println("Streaming example: ")
+  /*println("Streaming example: ")
 
   def streamResults(ids: List[Int]): IO[Vector[(Chunk[Answer], Chunk[Answer], Chunk[Answer])]] =
     Stream
@@ -80,5 +80,5 @@ object Runner extends App with ContextEntities {
       .view
       .mapValues(_.map(_.content).mkString(", "))
 
-  println(combStream.mkString("\n"))
+  println(combStream.mkString("\n"))*/
 }

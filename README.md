@@ -629,116 +629,114 @@ object DebugExample extends App with ContextEntities {
 
 Часто бывают ситуации, когда нужно предоставить пользователю выдачу на основании нескольких источников, данные из которых должны быть скомбинированы. Например, поисковая выдача по документам может для одного запроса обратиться к нескольким сервисам:
 
-- Elasticsearch для получения ID документов по какому-то поисковому запросу;
-- Сервис документов для получения ссылок на все подходящие документы по ID;
-- Сервис авторов для получения списка авторов этих документов;
-- Сервис аннотаций для получения краткого описания этих документов.
+- Полнотекстовый поиск для получения ID документов по какому-то поисковому запросу;
+- Сервис информации о документе;
+- Сервис получения имени автора документа из его ID;
+- Сервис похожих документов.
 
-Заметно, что последние три запроса можно выполнять параллельно и затем сгруппировать результаты по ID. Но все три зависят от первого запроса, который и возвращает список ID. 
-
-Сервис может выглядеть примерно так:
+Тогда сервис поиска документов может быть построен следующим образом (полный пример):
 
 ```scala
-object Runner extends App with ContextEntities {
+/*Model*/
 
-  // Псевдо-сервисы
-  val elasticsearchSource = new ElasticsearchSource().source
-  val documentsSource     = new GenericSource("Document URL").source
-  val authorsSource       = new GenericSource("Author").source
-  val annotationsSource   = new GenericSource("Annotation").source
+type DocumentId = String
+type PersonId = String
 
-  val fetch: Fetch[IO, (List[Answer], List[Answer], List[Answer])] = for {
+case class FtsResponse(ids: List[DocumentId])
 
-    searchResults <- Fetch("to be or not to be", elasticsearchSource)
+case class SimilarityItem(id: DocumentId, similarity: Double)
 
-    documents: Fetch[IO, List[Answer]]   = searchResults.traverse(r => Fetch(r, documentsSource))
-    authors: Fetch[IO, List[Answer]]     = searchResults.traverse(r => Fetch(r, authorsSource))
-    annotations: Fetch[IO, List[Answer]] = searchResults.traverse(r => Fetch(r, annotationsSource))
+case class DocumentInfo(id: DocumentId, info: String, authors: List[PersonId])
 
-    inParallel <- (documents, authors, annotations).tupled
+case class Person(id: PersonId, fullTitle: String)
 
-  } yield inParallel
+/*Response*/
+case class DocumentSearchResponse(
+    items: List[DocumentSearchItem]
+)
 
-  val result: (List[Answer], List[Answer], List[Answer]) = Fetch.run(fetch).unsafeRunSync
+case class DocumentItem(id: DocumentId, info: Option[String], authors: List[Person])
 
-  val comb: MapView[Int, String] =
-    result.productIterator
-      .asInstanceOf[Iterator[List[Answer]]]
-      .toList
-      .map(_.distinct)
-      .foldRight(List.empty[Answer])((e, a) => e ++ a)
-      .groupBy(_.id)
-      .view.mapValues(_.map(_.content).mkString(", "))
+case class DocumentSimilarItem(
+    item: DocumentItem,
+    similarity: Double
+)
 
-  println(comb.mkString("\n"))
+case class DocumentSearchItem(
+    item: DocumentItem,
+    similar: List[DocumentSimilarItem]
+)
+
+
+class DocumentSearchExample(
+    fts: Fts[IO],
+    documentInfoRepo: DocumentInfoRepo[IO],
+    vectorSearch: VectorSearch[IO],
+    personRepo: PersonRepo[IO]
+)(
+    implicit cs: ContextShift[IO]
+) {
+
+  val infoSource    = new DocumentInfoSource(documentInfoRepo, 16.some)
+  val personSource  = new PersonSource(personRepo, 16.some)
+  val similarSource = new SimilarDocumentSource(vectorSearch, 16.some)
+
+  def documentItemFetch(id: DocumentId): Fetch[IO, DocumentItem] =
+    for {
+      infoOpt <- infoSource.fetchElem(id)
+      p       <- infoOpt.traverse(i => i.authors.traverse(personSource.fetchElem).map(_.flatten))
+    } yield DocumentItem(id, infoOpt.map(_.info), p.getOrElse(List.empty[Person]))
+
+  def fetchSimilarItems(id: DocumentId): Fetch[IO, List[DocumentSimilarItem]] =
+    similarSource
+      .fetchElem(id)
+      .map(_.getOrElse(List.empty[SimilarityItem]))
+      .flatMap {
+        _.traverse { si =>
+          documentItemFetch(si.id).map { di =>
+            DocumentSimilarItem(di, si.similarity)
+          }
+        }
+      }
+
+  def searchDocumentFetch(query: String): Fetch[IO, DocumentSearchResponse] =
+    for {
+      docs <- Fetch.liftF(fts.search(query))
+      items <- docs.ids.traverse { id =>
+                (documentItemFetch(id), fetchSimilarItems(id)).tupled.map(r => DocumentSearchItem(r._1, r._2))
+              }
+    } yield DocumentSearchResponse(items)
 
 }
 ```
 
-Мы используем `tupled` для получения объекта Fetch `inParallel`, запуск которого будет осуществлён в параллели. Затем мы группируем полученные результаты и получаем что-то подобное:
+На вход `DocumentSearchExample` получает три репозитория. Это сами сервисы с кодом, который обращается непосредственно к хранилищам данных (например, там может быть код обращения к БД на Doobie). Далее они передаются в обёртки Fetch - `DocumentInfoSource`, `PersonSource` и `SimilarDocumentSource`, которые позволяют оптимизировать запросы к ним. 
 
-```
-INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Document URL: NonEmptyList(5, 10, 14, 1, 6)
-INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Author: NonEmptyList(5, 10, 14, 1, 6)
-INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Annotation: NonEmptyList(5, 10, 14, 1, 6)
-
-5 -> Document URL: https://en.wikipedia.org/wiki/Hamlet, Author: William Shakespeare, Annotation: The play depicts Prince Hamlet and his revenge against his uncle, Claudius, who has murdered Hamlet's father in order to seize his throne and marry Hamlet's mother
-
-...
-
-``` 
-
-Метод `distinct` здесь можно использовать на промежуточном результате - прямо в `searchResults`. В любом случае, при запросе в сервисы происходит дедупликация, поэтому повторяющиеся ID не запрашиваются (но возвращаются как если бы были запрошены). Их всё же следует отбросить позже - во время преобразований в `comb`. 
-
-Наконец, обычно сервисы не принимают бесконечное количество ID в запросе. В таких случаях пакетные запросы могут быть разделены через указание `maxBatchSize` как было описано выше. Кроме того, держать в памяти огромное количество полученных объектов (по три на каждый ID) может быть затратно. В таком случае очень удобно делать запросы в потоке. Предположим, что наше API принимает только 3 ID за раз. Тогда напишем функцию для считывания документов в потоке через библиотеку fs2. При этом имеет смысл разбить поток по 3 ID, всё равно это размер одного пакета API:
+Метод `searchDocumentFetch` служит для произведения полнотекстового поиска по запросу `query`. Сам по себе поиск выполняется отдельно от остальных запросов, поэтому для него используется сервис напрямую, без обёртки в Fetch. Сигнатура `search`:
 
 ```scala
-def streamResults(ids: List[Int]): IO[Vector[(Chunk[Answer], Chunk[Answer], Chunk[Answer])]] =
-  Stream
-    .emits[IO, Int](ids)
-    .chunkLimit(3)
-    .evalMap { groupByThree =>
-      val documents   = groupByThree.traverse(Fetch(_, documentsSource))
-      val authors     = groupByThree.traverse(Fetch(_, authorsSource))
-      val annotations = groupByThree.traverse(Fetch(_, annotationsSource))
-      println()
-      Fetch.run((documents, authors, annotations).tupled)
+def search(query: String): F[FtsResponse]
+```
+
+Поэтому метод `liftF` позволяет получить тип `Fetch[F, FtsResponse]`, который можно использовать в for наряду с остальными Fetch. Дляее для списка ID запрашиваются данные документа и ID похожих документов. Кортеж элементов Fetch соединён через `tupled`, что позволяет сделать эти вызовы параллельно, ведь они не зависят друг от друга. Наконец, возвращённые в этом вызове значения маппятся в тип `DocumentSearchItem`. 
+
+Метод `fetchSimilarItems` получет из `similarSource` ID похожих документов, а затем получает их информацию из метода `documentItemFetch`. В этот же метод обращаемся и при получении данных оригинальных документов. Он получает информацию о документах `DocumentInfo` по ID, а затем и имена авторов, указанных в информации.
+
+Использование свойств монад позволяет композировать множество вызовов в один объект вместо вложенных вроде `Fetch[IO, Fetch[...]]` благодаря методам `map` и `flatMap`:
+
+```scala
+
+similarSource
+  .fetchElem(id)
+  .map(_.getOrElse(List.empty[SimilarityItem]))  // Fetch
+  .flatMap { 
+    _.traverse { si =>
+      documentItemFetch(si.id).map { di =>  // Fetch
+        DocumentSimilarItem(di, si.similarity)
+      }
     }
-    .compile
-    .toVector
-
-val fetchStream: IO[Vector[(Chunk[Answer], Chunk[Answer], Chunk[Answer])]] = for {
-  searchResults <- Fetch.run(Fetch("to be or not to be", elasticsearchSource))
-  result        <- streamResults(searchResults)
-} yield result
-
-val streamResult = fetchStream.unsafeRunSync
-
-val combStream =
-  streamResult
-    .map(t => t._1.toList ++ t._2.toList ++ t._3.toList)
-    .toList
-    .flatten
-    .groupBy(_.id)
-    .view
-    .mapValues(_.map(_.content).mkString(", "))
-
-println(combStream.mkString("\n"))
+  }
 ```
-
-Опять же, запросы к сервисам будут происходить параллельно, это видно по их случайному порядку в логах:
-
-```scala
-INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Author: NonEmptyList(1, 2, 3)
-INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Document URL: NonEmptyList(1, 2, 3)
-INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Annotation: NonEmptyList(1, 2, 3)
-
-INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Annotation: NonEmptyList(4, 5, 6)
-INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Author: NonEmptyList(4, 5, 6)
-INFO app.searchfetchproto.GenericSource - IDs fetching in batch for Document URL: NonEmptyList(4, 5, 6)
-```
-
-Так как и Fetch, и Stream в данном случае используют тип `IO` - удобно использовать `evalMap`. Внутренний тип `IO` от `Fetch.run` и внешний от `compile` автоматически будут совмещены и получится удобный для работы тип `IO[Vector[...]]` без внутренних `IO`.
 
 
 ## Выводы
