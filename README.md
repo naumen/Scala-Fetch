@@ -148,14 +148,14 @@ object Example extends App {
 Fetch.run(Fetch.optional(3, source)).unsafeRunSync  // None
 ```
 
-Разницу можно понять просто взглянув на типы:
+Разницу можно понять просто, взглянув на типы:
 
 ```scala
 val fApply: Fetch[IO, String]            = Fetch(3, source)
 val fOptional: Fetch[IO, Option[String]] = Fetch.optional(3, source)
 ```
 
-Иногда внутрь классов-наследников `Data` помещают специальный метод, избавляющий от необходимости вручную составлять объект `Fetch`. Он может быть как обычным, так и `optional`:
+Иногда внутрь классов-наследников `Data` помещают специальный метод, избавляющий от необходимости вручную составлять объект `Fetch`. Он может быть, как обычным, так и `optional`:
 
 ```scala
 def fetchElem(id: Int) = Fetch.optional(id, source)
@@ -164,7 +164,7 @@ def fetchElem(id: Int) = Fetch.optional(id, source)
 Теперь возможно переписать используемые методы на заранее подготовленный `fetchElem` в классе `ListSource`:
 
 ```scala
-Fetch.run(data.fetchElem(0)).unsafeRunSync   // INFO app.ListDataSource - Processing element from index 0
+Fetch.run(data.fetchElem(0)).unsafeRunSync // INFO app.ListDataSource - Processing element from index 0
 Fetch.run(data.fetchElem(1)).unsafeRunSync // INFO app.ListDataSource - Processing element from index 1
 Fetch.run(data.fetchElem(2)).unsafeRunSync // INFO app.ListDataSource - Processing element from index 2
 println(Fetch.run(data.fetchElem(2)).unsafeRunSync) // Some(c)
@@ -186,7 +186,7 @@ fetch(1)  // INFO app.ListDataSource - Processing element from index 1
 fetch(1)  // INFO app.ListDataSource - Processing element from index 1
 ```
 
-Для кэширования в Fetch существует специальный трейт `DataCache[F[_]]`. Сама библиотека предоставляет одну готовую имплементацию - иммутабельный кэш `InMemoryCache[F[_]: Monad](state: Map[(Data[Any, Any], DataSourceId), DataSourceResult])`. Им можно воспользоваться через методы его объекта-компаньона `from` (создать кэш из готовой коллекции) и `empty` (создать пустой кэш):
+Для кэширования в Fetch существует специальный трейт `DataCache[F[_]]`. Сама библиотека предоставляет одну готовую имплементацию - неизменяемый кэш `InMemoryCache[F[_]: Monad](state: Map[(Data[Any, Any], DataSourceId), DataSourceResult])`. Им можно воспользоваться через методы его объекта-компаньона `from` (создать кэш из готовой коллекции) и `empty` (создать пустой кэш):
 
 ```scala
 def from[F[_]: Monad, I, A](results: ((Data[I, A], I), A)*): InMemoryCache[F] 
@@ -211,7 +211,7 @@ def lookup[I, A](i: I, data: Data[I, A]): F[Option[A]] =
   )
 ```
 
-Тут важно, что `Data` является частью ключа. Именно из переданного экземпляра `Data` берётся тип `A`, к которому методом `asInstanceOf[A]` приводится хранимый в кэше тип `Any` при запросе. Вставка в этот кэш работает на основе обычного метода map `updated`, который возвращает новую коллекцию при изменении.
+Тут важно, что `Data` является частью ключа. Именно из переданного экземпляра `Data` берётся тип `A`, к которому методом `asInstanceOf[A]` приводится хранимый в кэше тип `Any` при запросе. Вставка в этот кэш работает на основе обычного метода Map `updated`, который возвращает новую коллекцию при изменении.
 
 Наверное, никому особо не будет дела до кэша в коллекции, которая является обычной мапой Scala - её можно и руками написать. Но используемые в ней приёмы пригодятся для подключения какой-нибудь специальной библиотеки для кэширования.
 
